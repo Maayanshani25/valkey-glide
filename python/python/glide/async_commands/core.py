@@ -73,10 +73,12 @@ class ConditionalChange(Enum):
     A condition to the `SET`, `ZADD` and `GEOADD` commands.
     - ONLY_IF_EXISTS - Only update key / elements that already exist. Equivalent to `XX` in the Valkey API.
     - ONLY_IF_DOES_NOT_EXIST - Only set key / add elements that does not already exist. Equivalent to `NX` in the Valkey API.
+    - ONLY_IF_EQUAL - Only update key / elements if the "key" value is equal to the comparison value. Equivalent to `IFEQ` in the Valkey API.
     """
 
     ONLY_IF_EXISTS = "XX"
     ONLY_IF_DOES_NOT_EXIST = "NX"
+    ONLY_IF_EQUAL = "IFEQ"
 
 
 class ExpiryType(Enum):
@@ -436,6 +438,7 @@ class CoreCommands(Protocol):
         key: TEncodable,
         value: TEncodable,
         conditional_set: Optional[ConditionalChange] = None,
+        comparison_value: Optional[TEncodable] = None,
         expiry: Optional[ExpirySet] = None,
         return_old_value: bool = False,
     ) -> Optional[bytes]:
@@ -447,7 +450,7 @@ class CoreCommands(Protocol):
             key (TEncodable): the key to store.
             value (TEncodable): the value to store with the given key.
             conditional_set (Optional[ConditionalChange], optional): set the key only if the given condition is met.
-                Equivalent to [`XX` | `NX`] in the Valkey API. Defaults to None.
+                Equivalent to [`XX` | `NX` | `IFEQ`] in the Valkey API. Defaults to None.
             expiry (Optional[ExpirySet], optional): set expiriation to the given key.
                 Equivalent to [`EX` | `PX` | `EXAT` | `PXAT` | `KEEPTTL`] in the Valkey API. Defaults to None.
             return_old_value (bool, optional): Return the old value stored at key, or None if key did not exist.
@@ -457,7 +460,7 @@ class CoreCommands(Protocol):
         Returns:
             Optional[bytes]:
                 If the value is successfully set, return OK.
-                If value isn't set because of only_if_exists or only_if_does_not_exist conditions, return None.
+                If value isn't set because of only_if_exists or only_if_does_not_exist or only_if_equal conditions, return None.
                 If return_old_value is set, return the old value as a bytes string.
 
         Example:
@@ -465,14 +468,22 @@ class CoreCommands(Protocol):
                 'OK'
             >>> await client.set("key", "new_value",conditional_set=ConditionalChange.ONLY_IF_EXISTS, expiry=Expiry(ExpiryType.SEC, 5))
                 'OK' # Set "new_value" to "key" only if "key" already exists, and set the key expiration to 5 seconds.
-            >>> await client.set("key", "value", conditional_set=ConditionalChange.ONLY_IF_DOES_NOT_EXIST,return_old_value=True)
+            >>> await client.set("key", "value", conditional_set=ConditionalChange.ONLY_IF_DOES_NOT_EXIST, return_old_value=True)
                 b'new_value' # Returns the old value of "key".
             >>> await client.get("key")
                 b'new_value' # Value wasn't modified back to being "value" because of "NX" flag.
+            >>> await client.set("key", "ifeq_value", conditional_set=ConditionalChange.ONLY_IF_EQUAL, providedValue="new_value")
+                'OK' # sets "key" to "ifeq_value" only if the current value is "new_value".
         """
         args = [key, value]
         if conditional_set:
             args.append(conditional_set.value)
+            if conditional_set == ConditionalChange.ONLY_IF_EQUAL:
+                if not comparison_value:
+                    raise ValueError(
+                        "compatison_value is required for ConditionalChange.ONLY_IF_EQUAL"
+                    )
+                args.append(comparison_value)
         if return_old_value:
             args.append("GET")
         if expiry is not None:

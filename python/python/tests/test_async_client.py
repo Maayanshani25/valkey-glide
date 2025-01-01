@@ -467,6 +467,25 @@ class TestCommands:
         assert res is None
         assert await glide_client.get(key) == value.encode()
 
+        value2 = get_random_string(10)
+        res = await glide_client.set(
+            key,
+            value2,
+            conditional_set=ConditionalChange.ONLY_IF_EQUAL,
+            comparison_value=value2,
+        )
+        assert res is None
+        assert await glide_client.get(key) == value.encode()
+
+        res = await glide_client.set(
+            key,
+            value2,
+            conditional_set=ConditionalChange.ONLY_IF_EQUAL,
+            comparison_value=value,
+        )
+        assert res == OK
+        assert await glide_client.get(key) == value2.encode()
+
     @pytest.mark.parametrize("cluster_mode", [True, False])
     @pytest.mark.parametrize("protocol", [ProtocolVersion.RESP2, ProtocolVersion.RESP3])
     async def test_set_return_old_value(self, glide_client: TGlideClient):
