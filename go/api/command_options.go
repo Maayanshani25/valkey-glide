@@ -17,6 +17,8 @@ type SetOptions struct {
 	// If ConditionalSet is not set the value will be set regardless of prior value existence. If value isn't set because of
 	// the condition, [api.StringCommands.SetWithOptions] will return a zero-value string ("").
 	ConditionalSet ConditionalSet
+	// ComparisonValue is used to compare the current value of a key to. equivalent to IFEQ comparison-value in the valkey API.
+	ComparisonValue string
 	// Set command to return the old value stored at the given key, or a zero-value string ("") if the key did not exist. An
 	// error is returned and [api.StringCommands.SetWithOptions] is aborted if the value stored at key is not a string.
 	// Equivalent to GET in the valkey API.
@@ -40,6 +42,11 @@ func (setOptions *SetOptions) SetReturnOldValue(returnOldValue bool) *SetOptions
 	return setOptions
 }
 
+func (SetOptions *SetOptions) SetIfeqConditional(comparisonValue string) *SetOptions {
+	SetOptions.ComparisonValue = comparisonValue
+	return SetOptions
+}
+
 func (setOptions *SetOptions) SetExpiry(expiry *Expiry) *SetOptions {
 	setOptions.Expiry = expiry
 	return setOptions
@@ -50,6 +57,8 @@ func (opts *SetOptions) toArgs() ([]string, error) {
 	var err error
 	if opts.ConditionalSet != "" {
 		args = append(args, string(opts.ConditionalSet))
+	} else if opts.ComparisonValue != "" {
+		args = append(args, "IFEQ", opts.ComparisonValue)
 	}
 
 	if opts.ReturnOldValue {
@@ -117,7 +126,7 @@ const (
 	// OnlyIfExists only sets the key if it already exists. Equivalent to "XX" in the valkey API.
 	OnlyIfExists ConditionalSet = "XX"
 	// OnlyIfDoesNotExist only sets the key if it does not already exist. Equivalent to "NX" in the valkey API.
-	OnlyIfDoesNotExist ConditionalSet = "NX"
+	OnlyIfDoesNotExist ConditionalSet = "NX"	
 )
 
 type ExpireCondition string
