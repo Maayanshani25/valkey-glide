@@ -42,7 +42,7 @@ func (setOptions *SetOptions) SetReturnOldValue(returnOldValue bool) *SetOptions
 	return setOptions
 }
 
-func (SetOptions *SetOptions) SetIfeqConditional(comparisonValue string) *SetOptions {
+func (SetOptions *SetOptions) SetComparisonValue(comparisonValue string) *SetOptions {
 	SetOptions.ComparisonValue = comparisonValue
 	return SetOptions
 }
@@ -57,8 +57,15 @@ func (opts *SetOptions) toArgs() ([]string, error) {
 	var err error
 	if opts.ConditionalSet != "" {
 		args = append(args, string(opts.ConditionalSet))
-	} else if opts.ComparisonValue != "" {
+	} 
+
+	if opts.ConditionalSet == OnlyIfEqual {
+		if opts.ComparisonValue == "" {
+			return nil, &RequestError{"comparisonValue must be set when conditionalSet is ONLY_IF_EQUAL"}
+		}
 		args = append(args, "IFEQ", opts.ComparisonValue)
+	} else if opts.ComparisonValue != "" {
+		return nil, &RequestError{"comparisonValue can only be set when conditionalSet is ONLY_IF_EQUAL"}
 	}
 
 	if opts.ReturnOldValue {
@@ -127,6 +134,8 @@ const (
 	OnlyIfExists ConditionalSet = "XX"
 	// OnlyIfDoesNotExist only sets the key if it does not already exist. Equivalent to "NX" in the valkey API.
 	OnlyIfDoesNotExist ConditionalSet = "NX"	
+	// OnlyIfEqual only sets the key if the current value is equal to the comparisonValue. Equivalent to "IFEQ" in the valkey API.
+	OnlyIfEqual ConditionalSet = "IFEQ"
 )
 
 type ExpireCondition string

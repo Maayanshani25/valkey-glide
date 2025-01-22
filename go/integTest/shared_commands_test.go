@@ -114,6 +114,32 @@ func (suite *GlideTestSuite) TestSetWithOptions_OnlyIfDoesNotExist_existingKey()
 	})
 }
 
+func (suite *GlideTestSuite) TestSetWithOptions_OnlyIfEQual_CorrectKey() {
+	suite.runWithDefaultClients(func(client api.BaseClient) {
+		key := uuid.New().String()
+		suite.verifyOK(client.Set(key, initialValue))
+		// initialValue == current value of key
+		opts := api.NewSetOptionsBuilder().SetConditionalSet(api.OnlyIfEqual).SetComparisonValue(initialValue)
+		result, err := client.SetWithOptions(key, anotherValue, opts)
+
+		assert.Nil(suite.T(), err)
+		assert.Equal(suite.T(), anotherValue, result.Value())
+	})
+}
+
+func (suite *GlideTestSuite) TestSetWithOptions_OnlyIfEQual_WrongKey() {
+	suite.runWithDefaultClients(func(client api.BaseClient) {
+		key := uuid.New().String()
+		suite.verifyOK(client.Set(key, initialValue))
+		// anotherValue != current value of key
+		opts := api.NewSetOptionsBuilder().SetConditionalSet(api.OnlyIfEqual).SetComparisonValue(anotherValue) 
+		result, err := client.SetWithOptions(key, anotherValue, opts)
+
+		assert.Nil(suite.T(), err)
+		assert.Equal(suite.T(), anotherValue, result.Value())
+	})
+}
+
 func (suite *GlideTestSuite) TestSetWithOptions_KeepExistingExpiry() {
 	suite.runWithDefaultClients(func(client api.BaseClient) {
 		key := uuid.New().String()
