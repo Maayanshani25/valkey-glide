@@ -887,6 +887,7 @@ impl<C> Future for Request<C> {
             RequestStateProj::Future { future } => future,
             RequestStateProj::Sleep { sleep } => {
                 ready!(sleep.poll(cx));
+                // maayan - this is where we put the next to be retry
                 return Next::Retry {
                     request: self.project().request.take().unwrap(),
                 }
@@ -903,6 +904,7 @@ impl<C> Future for Request<C> {
                     );
                 }
                 if let Some(request) = self.project().request.take() {
+                    //maayan - we decide here on retry
                     return Next::Retry { request }.into();
                 } else {
                     return Next::Done.into();
@@ -975,6 +977,7 @@ impl<C> Future for Request<C> {
                         let mut request = this.request.take().unwrap();
                         request.info.reset_routing();
                         return Next::RefreshSlots {
+                            // maayan - moved ?
                             request: Some(request),
                             sleep_duration: Some(sleep_duration),
                             moved_redirect: None,
@@ -1000,6 +1003,7 @@ impl<C> Future for Request<C> {
                         Next::Retry { request }.into()
                     }
                     RetryMethod::MovedRedirect => {
+                        // maayan - moved
                         let mut request = this.request.take().unwrap();
                         let redirect_node = err.redirect_node();
                         request.info.set_redirect(
@@ -1007,6 +1011,7 @@ impl<C> Future for Request<C> {
                                 .map(|(node, _slot)| Redirect::Moved(node.to_string())),
                         );
                         Next::RefreshSlots {
+                            // maayan - moved
                             request: Some(request),
                             sleep_duration: None,
                             moved_redirect: RedirectNode::from_option_tuple(redirect_node),
@@ -2786,6 +2791,7 @@ where
             match result {
                 Next::Done => {}
                 Next::Retry { request } => {
+                    // maayan - add retry reciord
                     let future = Self::try_request(request.info.clone(), self.inner.clone());
                     self.in_flight_requests.push(Box::pin(Request {
                         retry_params: retry_params.clone(),
