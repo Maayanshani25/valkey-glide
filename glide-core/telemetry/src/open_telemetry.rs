@@ -351,6 +351,13 @@ impl GlideSpan {
         self.inner.get_reference_count()
     }
 }
+#[derive(Clone, Debug)]
+pub struct GlideOpenTelemetryTracesConfig {
+    /// Specifies how the exporter sends telemetry data to the collector, and holds the endpoint information.
+    trace_exporter: GlideOpenTelemetrySignalsExporter,
+    /// The percentage of requests to sample and create a span for, used to measure command duration.
+    trace_sample_percentage: u32,
+}
 
 /// OpenTelemetry configuration object. Use `GlideOpenTelemetryConfigBuilder` to construct it:
 ///
@@ -368,13 +375,6 @@ pub struct GlideOpenTelemetryConfig {
     metrics: Option<GlideOpenTelemetryMetricsConfig>,
 }
 
-#[derive(Clone, Debug)]
-pub struct GlideOpenTelemetryTracesConfig {
-    /// Specifies how the exporter sends telemetry data to the collector, and holds the endpoint information.
-    trace_exporter: GlideOpenTelemetrySignalsExporter,
-    /// The percentage of requests to sample and create a span for, used to measure command duration.
-    trace_sample_percentage: u32,
-}
 
 #[derive(Clone, Debug)]
 pub struct GlideOpenTelemetryMetricsConfig {
