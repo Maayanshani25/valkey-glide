@@ -360,15 +360,19 @@ pub(crate) mod shared_client_tests {
             send_set_and_get(test_basics.client.clone(), key.to_string()).await;
         });
     }
-    // todo: i think those tests dont check iam
+
     /// Helper function to set up mock AWS credentials for IAM testing
+    /// When setting up the test environment, the tests doesn't check real AWS credentials,
+    /// it just sets up mock credentials to simulate the environment.
+    ///
+    /// Uncomment this function when you have a real AWS environment to test against.
     fn setup_test_aws_credentials() {
-        // unsafe {
-        //     std::env::set_var("AWS_ACCESS_KEY_ID", "test_access_key_id");
-        //     std::env::set_var("AWS_SECRET_ACCESS_KEY", "test_secret_access_key");
-        //     std::env::set_var("AWS_SESSION_TOKEN", "test_session_token");
-        //     std::env::set_var("AWS_REGION", "us-east-1");
-        // }
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test_access_key_id");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test_secret_access_key");
+            std::env::set_var("AWS_SESSION_TOKEN", "test_session_token");
+            std::env::set_var("AWS_REGION", "us-east-1");
+        }
     }
 
     /// Helper function to create connection request with IAM authentication
@@ -377,7 +381,6 @@ pub(crate) mod shared_client_tests {
         cluster_name: &str,
         username: &str,
         region: &str,
-        service_type: glide_core::connection_request::ServiceType,
         refresh_interval_seconds: Option<u32>,
         use_tls: bool,
         cluster_mode: bool,
@@ -387,7 +390,7 @@ pub(crate) mod shared_client_tests {
         let iam_credentials = IamCredentials {
             cluster_name: cluster_name.into(),
             region: region.into(),
-            service_type: service_type.into(),
+            service_type: ServiceType::ELASTICACHE.into(),
             refresh_interval_seconds,
             ..Default::default()
         };
@@ -419,12 +422,12 @@ pub(crate) mod shared_client_tests {
     #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
     fn test_iam_authentication_elasticache_cluster() {
         block_on_all(async {
-            setup_test_aws_credentials();
+            // setup_test_aws_credentials();
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
             let username = "iam-auth"; // Replace with your IAM username
             let region = "us-east-1";
-            let endpoint = "clustercfg.iam-auth-test.nra7gl.use1.cache.amazonaws.com";
+            let endpoint = "clustercfg.iam-auth-test.nra7gl.use1.cache.amazonaws.com"; // Replace with your cluster endpoint
 
             // Use the provided endpoint and port
             let mock_address = redis::ConnectionAddr::Tcp(endpoint.to_string(), 6379);
@@ -435,9 +438,8 @@ pub(crate) mod shared_client_tests {
                 cluster_name,
                 username,
                 region,
-                ServiceType::ELASTICACHE,
-                None,  // Use default refresh interval
-                true,  // Use TLS
+                None, // Use default refresh interval
+                true, // Use TLS
                 true, // cluster mode
             );
 
@@ -457,6 +459,7 @@ pub(crate) mod shared_client_tests {
                     if error_msg.contains("failed to lookup address")
                         || error_msg.contains("Name or service not known")
                     {
+                        // todo: uncomment this when we have a real AWS environment
                         panic!(
                             "DNS lookup failed: Unable to resolve the address `{}`. Please verify that the endpoint is correct and accessible from your environment.\nError: {}",
                             endpoint, error_msg
@@ -464,6 +467,7 @@ pub(crate) mod shared_client_tests {
                     }
 
                     // Other errors will fall here, indicating problems with IAM token generation or connection/auth
+                    // todo: uncomment this when we have a real AWS environment
                     panic!(
                         "Failed to create client with IAM authentication: {}",
                         error_msg
@@ -473,124 +477,67 @@ pub(crate) mod shared_client_tests {
         });
     }
 
-    // #[rstest]
-    // #[serial_test::serial]
-    // #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
-    // fn test_iam_authentication_memorydb_cluster() {
-    //     block_on_all(async {
-    //         setup_test_aws_credentials();
+    #[rstest]
+    #[serial_test::serial]
+    #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
+    fn test_iam_authentication_configuration_validation() {
+        // Test that IAM configuration is properly validated
+        block_on_all(async {
+            setup_test_aws_credentials();
 
-    //         let cluster_name = "test-memorydb-cluster";
-    //         let username = "memorydb-iam-user";
-    //         let region = "us-west-2";
+            let mock_address = redis::ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379);
 
-    //         // Create mock cluster addresses (in real scenarios, these would be your MemoryDB endpoints)
-    //         let mock_addresses = vec![
-    //             redis::ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379),
-    //             redis::ConnectionAddr::Tcp("127.0.0.1".to_string(), 6380),
-    //             redis::ConnectionAddr::Tcp("127.0.0.1".to_string(), 6381),
-    //         ];
+            // Test with empty cluster name (should be handled gracefully)
+            let connection_request = create_iam_connection_request(
+                std::slice::from_ref(&mock_address),
+                "", // Empty cluster name
+                "test-user",
+                "us-east-1",
+                None, // Use default refresh interval
+                true, // Use TLS
+                true, // cluster mode
+            );
 
-    //         let connection_request = create_iam_connection_request(
-    //             &mock_addresses,
-    //             cluster_name,
-    //             username,
-    //             region,
-    //             glide_core::connection_request::ServiceType::MEMORYDB,
-    //             Some(600), // 10 minutes refresh interval
-    //             true,      // Use TLS for MemoryDB
-    //             true,      // Cluster mode
-    //         );
+            let client_result = Client::new(connection_request.into(), None).await;
 
-    //         // Attempt to create client with IAM authentication
-    //         let client_result = Client::new(connection_request.into(), None).await;
+            // Should fail, but with a meaningful error about cluster name
+            assert!(
+                client_result.is_err(),
+                "Empty cluster name should cause an error"
+            );
 
-    //         match client_result {
-    //             Ok(_client) => {
-    //                 println!("MemoryDB IAM authentication succeeded (real AWS environment)");
-    //             }
-    //             Err(err) => {
-    //                 let error_msg = err.to_string();
-    //                 println!(
-    //                     "Expected MemoryDB IAM authentication error in test environment: {}",
-    //                     error_msg
-    //                 );
+            // Test with empty region
+            let connection_request = create_iam_connection_request(
+                std::slice::from_ref(&mock_address),
+                "test-cluster",
+                "test-user",
+                "",   // Empty region
+                None, // Use default refresh interval
+                true, // Use TLS
+                true, // cluster mode
+            );
 
-    //                 // Verify it's not a configuration parsing error
-    //                 assert!(
-    //                     !error_msg.contains("invalid") && !error_msg.contains("parse"),
-    //                     "Error should be connection/auth related, not configuration parsing: {}",
-    //                     error_msg
-    //                 );
-    //             }
-    //         }
-    //     });
-    // }
+            let client_result = Client::new(connection_request.into(), None).await;
+            assert!(client_result.is_err(), "Empty region should cause an error");
 
-    // #[rstest]
-    // #[serial_test::serial]
-    // #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
-    // fn test_iam_authentication_configuration_validation() {
-    //     // Test that IAM configuration is properly validated
-    //     block_on_all(async {
-    //         setup_test_aws_credentials();
+            // Test with empty username
+            let connection_request = create_iam_connection_request(
+                std::slice::from_ref(&mock_address),
+                "test-cluster",
+                "", // Empty username
+                "us-east-1",
+                None, // Use default refresh interval
+                true, // Use TLS
+                true, // cluster mode
+            );
 
-    //         let mock_address = redis::ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379);
-
-    //         // Test with empty cluster name (should be handled gracefully)
-    //         let connection_request = create_iam_connection_request(
-    //             &[mock_address.clone()],
-    //             "", // Empty cluster name
-    //             "test-user",
-    //             "us-east-1",
-    //             glide_core::connection_request::ServiceType::ELASTICACHE,
-    //             None,
-    //             true,
-    //             false,
-    //         );
-
-    //         let client_result = Client::new(connection_request.into(), None).await;
-
-    //         // Should fail, but with a meaningful error about cluster name
-    //         assert!(
-    //             client_result.is_err(),
-    //             "Empty cluster name should cause an error"
-    //         );
-
-    //         // Test with empty region
-    //         let connection_request = create_iam_connection_request(
-    //             &[mock_address.clone()],
-    //             "test-cluster",
-    //             "test-user",
-    //             "", // Empty region
-    //             glide_core::connection_request::ServiceType::ELASTICACHE,
-    //             None,
-    //             true,
-    //             false,
-    //         );
-
-    //         let client_result = Client::new(connection_request.into(), None).await;
-    //         assert!(client_result.is_err(), "Empty region should cause an error");
-
-    //         // Test with empty username
-    //         let connection_request = create_iam_connection_request(
-    //             &[mock_address],
-    //             "test-cluster",
-    //             "", // Empty username
-    //             "us-east-1",
-    //             glide_core::connection_request::ServiceType::ELASTICACHE,
-    //             None,
-    //             true,
-    //             false,
-    //         );
-
-    //         let client_result = Client::new(connection_request.into(), None).await;
-    //         assert!(
-    //             client_result.is_err(),
-    //             "Empty username should cause an error"
-    //         );
-    //     });
-    // }
+            let client_result = Client::new(connection_request.into(), None).await;
+            assert!(
+                client_result.is_err(),
+                "Empty username should cause an error"
+            );
+        });
+    }
 
     #[rstest]
     #[serial_test::serial]

@@ -619,7 +619,7 @@ pub async fn setup_acl(addr: &ConnectionAddr, connection_info: &RedisConnectionI
     connection.send_packed_command(&cmd).await.unwrap();
 }
 
-#[derive(Eq, PartialEq, Default, Clone)]
+#[derive(Eq, PartialEq, Default, Clone, Debug)]
 pub enum ClusterMode {
     #[default]
     Disabled,
@@ -667,7 +667,7 @@ pub fn create_connection_request(
     connection_request
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct TestConfiguration {
     pub use_tls: bool,
     pub connection_retry_strategy: Option<connection_request::ConnectionRetryStrategy>,

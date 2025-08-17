@@ -1,6 +1,8 @@
 use aws_config::BehaviorVersion;
 use aws_credential_types::{Credentials, provider::ProvideCredentials};
-use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
+use aws_sigv4::http_request::{
+    SignableBody, SignableRequest, SignatureLocation, SigningSettings, sign,
+};
 use aws_sigv4::sign::v4;
 use logger_core::{log_error, log_info, log_warn};
 use std::sync::Arc;
@@ -18,6 +20,8 @@ const DEFAULT_REFRESH_INTERVAL_SECONDS: u32 = 14 * 60; // 840 seconds
 /// Warning threshold for refresh interval in seconds (15 minutes)
 /// Setting refresh intervals above this value may have performance consequences
 const WARNING_REFRESH_INTERVAL_SECONDS: u32 = 15 * 60; // 900 seconds
+/// SigV4 presign expiration (15 minutes)
+const TOKEN_TTL_SECONDS: u64 = 15 * 60; // 900
 
 /// Custom error type for IAM operations in Glide
 #[derive(Debug, Error)]
@@ -37,7 +41,7 @@ pub enum GlideIAMError {
     Other(String),
 }
 
-// Service type configuration for IAM authentication
+/// Service type configuration for IAM authentication
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceType {
     ElastiCache,
@@ -51,17 +55,16 @@ impl ServiceType {
             ServiceType::MemoryDB => "memorydb",
         }
     }
-
-    fn hostname_suffix(&self) -> &'static str {
-        match self {
-            ServiceType::ElastiCache => "cache.amazonaws.com",
-            ServiceType::MemoryDB => "memorydb.amazonaws.com",
-        }
-    }
 }
 
-fn validate_refresh_interval(refresh_interval_seconds: Option<u32>) -> Result<Option<u32>, GlideIAMError> {
-
+/// Validate and normalize the refresh interval.
+///
+/// Returns:
+/// - `Ok(Some(x))` with the provided/normalized value
+/// - `Err` if out of bounds
+fn validate_refresh_interval(
+    refresh_interval_seconds: Option<u32>,
+) -> Result<Option<u32>, GlideIAMError> {
     match refresh_interval_seconds {
         Some(0) => {
             // Reject 0 as an invalid interval
@@ -100,7 +103,7 @@ fn validate_refresh_interval(refresh_interval_seconds: Option<u32>) -> Result<Op
     }
 }
 
-// Internal state structure for IAM token management
+/// Internal state structure for IAM token management
 #[derive(Clone, Debug)]
 struct IamTokenState {
     /// AWS region for signing requests
@@ -109,27 +112,25 @@ struct IamTokenState {
     cluster_name: String,
     /// Username for the connection
     username: String,
+    // todo: Add serverless endpoint to state. should be a bool? https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/auth-iam.html
     /// Service type (ElastiCache or MemoryDB)
     service_type: ServiceType,
     /// Token refresh interval in seconds
     refresh_interval_seconds: u32,
 }
 
-#[derive(Debug)]
 /// IAM-based authentication token manager for ElastiCache/MemoryDB
 ///
 /// Manages automatic token refresh using AWS IAM credentials and SigV4 signing.
-/// Tokens are valid for 15 minutes and refreshed every 8 minutes by default.
+/// Tokens are valid for 15 minutes and refreshed every 14 minutes by default.
+#[derive(Debug)]
 pub struct IAMTokenManager {
     /// Currently cached auth token (protected by RwLock)
     cached_token: Arc<RwLock<String>>,
-
     /// IAM token state containing all configuration
     iam_token_state: IamTokenState,
-
     /// Background refresh task handle
     refresh_task: Option<JoinHandle<()>>,
-
     /// Shutdown signal for graceful task termination
     shutdown_notify: Arc<Notify>,
 }
@@ -152,15 +153,15 @@ impl IAMTokenManager {
         service_type: ServiceType,
         refresh_interval_seconds: Option<u32>,
     ) -> Result<Self, GlideIAMError> {
-        // Validate refresh_interval_seconds is between 0 and 43200 (12 hours)
-           let validated_refresh_interval = validate_refresh_interval(refresh_interval_seconds)?;
+        let validated_refresh_interval = validate_refresh_interval(refresh_interval_seconds)?;
 
         let state = IamTokenState {
             region,
             cluster_name,
             username,
             service_type,
-            refresh_interval_seconds: validated_refresh_interval.unwrap_or(DEFAULT_REFRESH_INTERVAL_SECONDS),
+            refresh_interval_seconds: validated_refresh_interval
+                .unwrap_or(DEFAULT_REFRESH_INTERVAL_SECONDS),
         };
 
         // Generate initial token using the state
@@ -195,15 +196,12 @@ impl IAMTokenManager {
 
     /// Background token refresh task implementation
     ///
-    /// This function runs in a separate tokio task and periodically refreshes the IAM token
-    /// based on the configured refresh interval. It handles graceful shutdown and continues
-    /// running even if individual refresh attempts fail.
+    /// Runs periodically based on the configured refresh interval.
     async fn token_refresh_task(
         iam_token_state: IamTokenState,
         cached_token: Arc<RwLock<String>>,
         shutdown_notify: Arc<Notify>,
     ) {
-        // Get refresh interval from state
         let refresh_interval = Duration::from_secs(iam_token_state.refresh_interval_seconds as u64);
 
         let mut interval_timer = interval(refresh_interval);
@@ -226,17 +224,11 @@ impl IAMTokenManager {
     }
 
     /// Handle a single token refresh attempt
-    ///
-    /// This function attempts to generate a new token and update the cached token.
-    /// If the refresh fails, it logs an error but doesn't stop the refresh task.
     async fn handle_token_refresh(
         iam_token_state: &IamTokenState,
         cached_token: &Arc<RwLock<String>>,
     ) {
-        // Generate new token using the state
-        let token_result = Self::generate_token_static(iam_token_state).await;
-
-        match token_result {
+        match Self::generate_token_static(iam_token_state).await {
             Ok(new_token) => {
                 Self::set_cached_token_static(cached_token, new_token).await;
                 log_info("IAM token refreshed successfully", "");
@@ -252,7 +244,6 @@ impl IAMTokenManager {
     pub async fn stop_refresh_task(&mut self) {
         if let Some(task) = self.refresh_task.take() {
             self.shutdown_notify.notify_one();
-
             // Give the task a moment to shut down gracefully
             let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
         }
@@ -275,10 +266,9 @@ impl IAMTokenManager {
         token_guard.clone()
     }
 
-    /// This method creates an ElastiCache/MemoryDB authentication token using AWS IAM credentials
-    /// and SigV4 signing. The generated token is valid for 15 minutes and includes the signed
-    /// username for authentication. It is designed to be used in environments where secure
-    /// authentication to AWS services is required.
+    /// Create an ElastiCache/MemoryDB authentication token using AWS IAM credentials
+    /// and SigV4 signing. The generated token is valid for 15 minutes and includes the
+    /// signed username for authentication.
     async fn generate_token_static(state: &IamTokenState) -> Result<String, GlideIAMError> {
         // Load AWS credentials from the environment or AWS config files
         let config = aws_config::defaults(BehaviorVersion::latest())
@@ -297,33 +287,24 @@ impl IAMTokenManager {
             .await
             .map_err(|e| GlideIAMError::CredentialsError(e.to_string()))?;
 
-        // todo: check about memoryDB auth as provider name. Do we care about it?
         // Create AWS identity from credentials
         let identity = Credentials::new(
             creds.access_key_id(),
             creds.secret_access_key(),
             creds.session_token().map(|s| s.to_string()),
             None,
-            state.service_type.service_name(),
+            state.service_type.service_name(), // "elasticache" | "memorydb"
         );
 
-        // Calculate the current time for signing
         let signing_time = SystemTime::now();
 
-        // Create the canonical request for ElastiCache/MemoryDB auth token
-        let hostname = format!(
-            "{}.{}.{}",
-            state.cluster_name,
-            state.region,
-            state.service_type.hostname_suffix()
-        );
-        let canonical_uri = "/";
-        let canonical_querystring = format!(
-            "Action=connect&User={}&X-Amz-Expires=900",
-            urlencoding::encode(&state.username)
-        );
+        let hostname = state.cluster_name.to_string();
+        let base_url = build_base_url(&hostname, &state.username);
 
-        let signing_settings = SigningSettings::default();
+        let mut signing_settings = SigningSettings::default();
+        signing_settings.signature_location = SignatureLocation::QueryParams;
+        signing_settings.expires_in = Some(Duration::from_secs(TOKEN_TTL_SECONDS));
+
         let identity_value = identity.into();
         let signing_params = v4::SigningParams::builder()
             .identity(&identity_value)
@@ -337,11 +318,10 @@ impl IAMTokenManager {
             })?
             .into();
 
-        // Create signable request
-        let request_url = format!("https://{hostname}{canonical_uri}?{canonical_querystring}");
+        // Create signable request with the simple hostname
         let signable_request = SignableRequest::new(
             "GET",
-            &request_url,
+            &base_url,
             std::iter::empty(),
             SignableBody::Bytes(b""),
         )
@@ -349,48 +329,26 @@ impl IAMTokenManager {
             GlideIAMError::TokenGenerationError(format!("Failed to create signable request: {e}"))
         })?;
 
-        // Sign the request
-        let (signing_instructions, _signature) = sign(signable_request, &signing_params)
-            .map_err(|e| {
-                GlideIAMError::TokenGenerationError(format!("Failed to sign request: {e}"))
-            })?
+        // Sign the request (with presigning settings, this will generate query parameters)
+        let (instructions, _sig) = sign(signable_request, &signing_params)
+            .map_err(|e| GlideIAMError::TokenGenerationError(format!("Failed to sign: {e}")))?
             .into_parts();
 
         // Build a temporary HTTP request to apply the signing instructions
-        let mut temp_request = http::Request::builder()
+        let mut req = http::Request::builder()
             .method("GET")
-            .uri(&request_url)
-            .header("Host", &hostname)
-            .body("")
+            .uri(&base_url)
+            .header("host", &hostname)
+            .body(())
             .map_err(|e| {
-                GlideIAMError::TokenGenerationError(format!("Failed to build HTTP request: {e}"))
+                GlideIAMError::TokenGenerationError(format!("Build HTTP request failed: {e}"))
             })?;
+        instructions.apply_to_request_http1x(&mut req);
 
-        // Apply the signing instructions to get the authorization header
-        signing_instructions.apply_to_request_http1x(&mut temp_request);
+        // Extract the token from the signed request URI
+        let token = strip_scheme(req.uri().to_string());
 
-        // Extract the authorization header
-        let auth_header = temp_request
-            .headers()
-            .get("authorization")
-            .ok_or(GlideIAMError::TokenGenerationError(
-                "Authorization header not found in signed request".to_string(),
-            ))?
-            .to_str()
-            .map_err(|e| {
-                GlideIAMError::TokenGenerationError(format!(
-                    "Failed to convert authorization header to string: {e}"
-                ))
-            })?;
-
-        // The ElastiCache auth token format: username?query_params&Authorization=signature
-        let token = format!(
-            "{}?{}&Authorization={}",
-            state.username,
-            canonical_querystring,
-            urlencoding::encode(auth_header)
-        );
-
+        println!("IAM token: {}", token);
         Ok(token)
     }
 
@@ -410,6 +368,23 @@ impl Drop for IAMTokenManager {
         // Note: We can't await in Drop, so the task cleanup happens in stop_refresh_task()
         // or will be handled by the tokio runtime when the JoinHandle is dropped
     }
+}
+
+/// Build the presign base URL for the target host and user.
+fn build_base_url(hostname: &str, username: &str) -> String {
+    format!(
+        "https://{}/?Action=connect&User={}",
+        hostname,
+        urlencoding::encode(username)
+    )
+}
+
+/// Remove `http://` or `https://` scheme from a URL string.
+fn strip_scheme(full: String) -> String {
+    full.strip_prefix("https://")
+        .or_else(|| full.strip_prefix("http://"))
+        .unwrap_or(&full)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -518,10 +493,10 @@ mod tests {
             &state,
         );
 
-        // Verify token format: username?query_params&Authorization=signature
+        // Verify token format matches new AWS SigV4 query parameter format
         assert!(
-            token.starts_with(username),
-            "Token should start with username"
+            token.starts_with(&format!("{}/", cluster_name)),
+            "Token should start with cluster name"
         );
         assert!(
             token.contains("Action=connect"),
@@ -532,12 +507,32 @@ mod tests {
             "Token should contain User parameter"
         );
         assert!(
+            token.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
+            "Token should contain AWS4-HMAC-SHA256 algorithm"
+        );
+        assert!(
+            token.contains("X-Amz-Credential="),
+            "Token should contain X-Amz-Credential parameter"
+        );
+        assert!(
+            token.contains("X-Amz-Date="),
+            "Token should contain X-Amz-Date parameter"
+        );
+        assert!(
             token.contains("X-Amz-Expires=900"),
             "Token should contain 15-minute expiration"
         );
         assert!(
-            token.contains("Authorization="),
-            "Token should contain Authorization parameter"
+            token.contains("X-Amz-SignedHeaders=host"),
+            "Token should contain X-Amz-SignedHeaders parameter"
+        );
+        assert!(
+            token.contains("X-Amz-Signature="),
+            "Token should contain X-Amz-Signature parameter"
+        );
+        assert!(
+            token.contains("X-Amz-Security-Token=test_session_token"),
+            "Token should contain X-Amz-Security-Token parameter"
         );
     }
 
@@ -571,8 +566,8 @@ mod tests {
         );
 
         assert!(
-            token.starts_with(username),
-            "Token should start with username"
+            token.starts_with(&format!("{}/", cluster_name)),
+            "Token should start with cluster name"
         );
         assert!(
             token.contains("User=memorydb-user"),
@@ -610,8 +605,8 @@ mod tests {
         );
 
         assert!(
-            token.starts_with(username),
-            "Token should start with encoded username"
+            token.starts_with(&format!("{}/", cluster_name)),
+            "Token should start with cluster name"
         );
         assert!(
             token.contains("User=test%40user.com"),
@@ -653,8 +648,8 @@ mod tests {
 
         assert!(!token.is_empty(), "Initial token should not be empty");
         assert!(
-            token.starts_with("test-user"),
-            "Token should start with username"
+            token.starts_with(&format!("{}/", cluster_name)),
+            "Token should start with cluster name"
         );
     }
 
@@ -778,8 +773,8 @@ mod tests {
             "Refreshed token should be different from initial token"
         );
         assert!(
-            new_token.starts_with("test-user"),
-            "New token should still start with username"
+            new_token.starts_with(&format!("{}/", cluster_name)),
+            "New token should still start with cluster name"
         );
     }
 
@@ -894,10 +889,6 @@ mod tests {
 
         // Verify it uses ElastiCache service by checking the token format
         assert!(
-            token.starts_with("test-user"),
-            "Token should start with username"
-        );
-        assert!(
             token.contains("Action=connect"),
             "Token should contain Action=connect"
         );
@@ -988,7 +979,10 @@ mod tests {
 
         // Get initial token
         let initial_token = manager.get_token().await;
-        assert!(!initial_token.is_empty(), "Initial token should not be empty");
+        assert!(
+            !initial_token.is_empty(),
+            "Initial token should not be empty"
+        );
 
         // Save initial token to JSON file for inspection
         let state = create_test_state(&region, &cluster_name, &username, ServiceType::ElastiCache);
@@ -1044,8 +1038,8 @@ mod tests {
             ("second_refresh", &second_refresh_token),
         ] {
             assert!(
-                token.starts_with(&username),
-                "{name} token should start with username"
+                token.starts_with(&format!("{}/", cluster_name)),
+                "{name} token should start with cluster name"
             );
             assert!(
                 token.contains("Action=connect"),
@@ -1056,8 +1050,8 @@ mod tests {
                 "{name} token should contain 15-minute expiration"
             );
             assert!(
-                token.contains("Authorization="),
-                "{name} token should contain Authorization parameter"
+                token.contains("X-Amz-Signature="),
+                "{name} token should contain X-Amz-Signature parameter"
             );
         }
 
