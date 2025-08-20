@@ -45,6 +45,7 @@ pub enum GlideIAMError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceType {
     ElastiCache,
+    Serverless,
     MemoryDB,
 }
 
@@ -52,6 +53,7 @@ impl ServiceType {
     fn service_name(&self) -> &'static str {
         match self {
             ServiceType::ElastiCache => "elasticache",
+            ServiceType::Serverless => "elasticache",
             ServiceType::MemoryDB => "memorydb",
         }
     }
@@ -112,7 +114,6 @@ struct IamTokenState {
     cluster_name: String,
     /// Username for the connection
     username: String,
-    // todo: Add serverless endpoint to state. should be a bool? https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/auth-iam.html
     /// Service type (ElastiCache or MemoryDB)
     service_type: ServiceType,
     /// Token refresh interval in seconds
@@ -141,7 +142,7 @@ impl IAMTokenManager {
     /// # Arguments
     /// * `cluster_name` - The ElastiCache/MemoryDB cluster name
     /// * `username` - Username for authentication
-    /// * `region` - AWS region
+    /// * `region` - AWS region of the cluster
     /// * `service_type` - Service type (ElastiCache or MemoryDB)
     /// * `refresh_interval_seconds` - Optional refresh interval in seconds. Defaults to 14 minutes (840 seconds).
     ///   Maximum allowed is 12 hours (43200 seconds). Values above 15 minutes (900 seconds) will log a warning
@@ -418,6 +419,18 @@ mod tests {
         }
     }
 
+    fn remove_test_credentials() {
+        // Clear any existing AWS credentials
+        unsafe {
+            env::remove_var("AWS_ACCESS_KEY_ID");
+            env::remove_var("AWS_SECRET_ACCESS_KEY");
+            env::remove_var("AWS_SESSION_TOKEN");
+            env::remove_var("AWS_PROFILE");
+            env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+            env::remove_var("AWS_CONFIG_FILE");
+        }
+    }
+
     /// Helper function to save token to JSON file for inspection
     fn save_token_to_file(test_name: &str, token: &str, state: &IamTokenState) {
         let token_data = serde_json::json!({
@@ -571,6 +584,45 @@ mod tests {
         );
         assert!(
             token.contains("User=memorydb-user"),
+            "Token should contain correct username"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_iam_generate_token_static_with_serverless_service() {
+        initialize_test_environment(); // Ensure test environment is clean
+        setup_test_credentials();
+
+        let region = "us-west-1";
+        let cluster_name = "serverless-cluster";
+        let username = "serverless-user";
+        let service_type = ServiceType::Serverless;
+
+        let state = create_test_state(region, cluster_name, username, service_type.clone());
+        let result = IAMTokenManager::generate_token_static(&state).await;
+
+        assert!(
+            result.is_ok(),
+            "Token generation should succeed for Serverless"
+        );
+
+        let token = result.unwrap();
+
+        // Save token to JSON file for inspection
+        let state = create_test_state(region, cluster_name, username, service_type);
+        save_token_to_file(
+            "test_iam_generate_token_static_with_serverless_service",
+            &token,
+            &state,
+        );
+
+        assert!(
+            token.starts_with(&format!("{}/", cluster_name)),
+            "Token should start with cluster name"
+        );
+        assert!(
+            token.contains("User=serverless-user"),
             "Token should contain correct username"
         );
     }
@@ -827,14 +879,7 @@ mod tests {
         initialize_test_environment(); // Ensure test environment is clean
 
         // Clear any existing AWS credentials
-        unsafe {
-            env::remove_var("AWS_ACCESS_KEY_ID");
-            env::remove_var("AWS_SECRET_ACCESS_KEY");
-            env::remove_var("AWS_SESSION_TOKEN");
-            env::remove_var("AWS_PROFILE");
-            env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
-            env::remove_var("AWS_CONFIG_FILE");
-        }
+        remove_test_credentials();
 
         let region = "us-east-1";
         let cluster_name = "test-cluster";

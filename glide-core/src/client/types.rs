@@ -152,6 +152,7 @@ impl From<protobuf::ConnectionRequest> for ConnectionRequest {
                 let region = chars_to_string_option(&iam_creds.region).unwrap_or_default();
                 let service_type = match iam_creds.service_type.enum_value() {
                     Ok(protobuf::ServiceType::MEMORYDB) => ServiceType::MemoryDB,
+                    Ok(protobuf::ServiceType::SERVERLESS) => ServiceType::Serverless,
                     _ => ServiceType::ElastiCache,
                 };
                 let refresh_interval_seconds = iam_creds.refresh_interval_seconds;
