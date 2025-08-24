@@ -45,7 +45,6 @@ pub enum GlideIAMError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceType {
     ElastiCache,
-    Serverless,
     MemoryDB,
 }
 
@@ -53,7 +52,6 @@ impl ServiceType {
     fn service_name(&self) -> &'static str {
         match self {
             ServiceType::ElastiCache => "elasticache",
-            ServiceType::Serverless => "elasticache",
             ServiceType::MemoryDB => "memorydb",
         }
     }
@@ -588,44 +586,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn test_iam_generate_token_static_with_serverless_service() {
-        initialize_test_environment(); // Ensure test environment is clean
-        setup_test_credentials();
-
-        let region = "us-west-1";
-        let cluster_name = "serverless-cluster";
-        let username = "serverless-user";
-        let service_type = ServiceType::Serverless;
-
-        let state = create_test_state(region, cluster_name, username, service_type.clone());
-        let result = IAMTokenManager::generate_token_static(&state).await;
-
-        assert!(
-            result.is_ok(),
-            "Token generation should succeed for Serverless"
-        );
-
-        let token = result.unwrap();
-
-        // Save token to JSON file for inspection
-        let state = create_test_state(region, cluster_name, username, service_type);
-        save_token_to_file(
-            "test_iam_generate_token_static_with_serverless_service",
-            &token,
-            &state,
-        );
-
-        assert!(
-            token.starts_with(&format!("{}/", cluster_name)),
-            "Token should start with cluster name"
-        );
-        assert!(
-            token.contains("User=serverless-user"),
-            "Token should contain correct username"
-        );
-    }
 
     #[tokio::test]
     #[serial]

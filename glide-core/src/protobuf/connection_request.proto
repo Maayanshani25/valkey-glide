@@ -28,8 +28,7 @@ message AuthenticationInfo {
 
 enum ServiceType {
   ELASTICACHE = 0;
-  SERVERLESS  = 1;
-  MEMORYDB    = 2;
+  MEMORYDB    = 1;
 }
 
 message IamCredentials {

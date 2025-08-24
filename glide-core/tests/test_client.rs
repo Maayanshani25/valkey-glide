@@ -361,20 +361,6 @@ pub(crate) mod shared_client_tests {
         });
     }
 
-    /// Helper function to set up mock AWS credentials for IAM testing
-    /// When setting up the test environment, the tests doesn't check real AWS credentials,
-    /// it just sets up mock credentials to simulate the environment.
-    ///
-    /// Uncomment this function when you have a real AWS environment to test against.
-    fn setup_test_aws_credentials() {
-        unsafe {
-            std::env::set_var("AWS_ACCESS_KEY_ID", "test_access_key_id");
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test_secret_access_key");
-            std::env::set_var("AWS_SESSION_TOKEN", "test_session_token");
-            std::env::set_var("AWS_REGION", "us-east-1");
-        }
-    }
-
     fn remove_test_credentials() {
         // Clear any existing AWS credentials
         unsafe {
@@ -435,7 +421,6 @@ pub(crate) mod shared_client_tests {
     #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
     fn test_iam_authentication_elasticache_cluster() {
         block_on_all(async {
-            // setup_test_aws_credentials();
             remove_test_credentials();
 
             let cluster_name = "iam-auth-test"; // Replace with your ElastiCache cluster name
@@ -473,7 +458,7 @@ pub(crate) mod shared_client_tests {
                     if error_msg.contains("failed to lookup address")
                         || error_msg.contains("Name or service not known")
                     {
-                        // Uncomment this when we have a real AWS environment
+                        // Uncomment this when you have a real AWS environment
                         // panic!(
                         //     "DNS lookup failed: Unable to resolve the address `{}`. Please verify that the endpoint is correct and accessible from your environment.\nError: {}",
                         //     endpoint, error_msg
@@ -481,7 +466,7 @@ pub(crate) mod shared_client_tests {
                     }
 
                     // Other errors will fall here, indicating problems with IAM token generation or connection/auth
-                    // Uncomment this when we have a real AWS environment
+                    // Uncomment this when you have a real AWS environment
                     // panic!(
                     //     "Failed to create client with IAM authentication: {}",
                     //     error_msg
