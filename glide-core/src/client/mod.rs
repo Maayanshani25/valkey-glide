@@ -24,10 +24,11 @@ use redis::{
 pub use standalone_client::StandaloneClient;
 use std::io;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Handle};
 pub use types::*;
 
@@ -1122,23 +1123,58 @@ impl Client {
     /// IAM token refresh callback function
     ///
     /// On new token, spawns a task that write-locks the `Client` and calls
-    /// `update_connection_password(Some(new_token), true)`. Uses a strong `Arc<RwLock<Client>>`.
+    /// `update_connection_password(Some(new_token), immediate_auth)` where `immediate_auth` is
+    /// `true` once every 10 hours and `false` otherwise. Uses a strong `Arc<RwLock<Client>>`.
     /// Note: this can form a retain cycle; call `stop_refresh_task()` and drop the manager to tear down.
     fn iam_callback(
         client_arc: Arc<tokio::sync::RwLock<Client>>,
     ) -> impl Fn(String) + Send + 'static {
+        // Track the last time we performed immediate authentication
+        // Initialize to None so the first refresh will authenticate immediately
+        let last_auth_time: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        const AUTH_INTERVAL: Duration = Duration::from_secs(10 * 60 * 60); // 10 hours
+
         move |new_token: String| {
             let client_arc = Arc::clone(&client_arc);
+            let last_auth_time = Arc::clone(&last_auth_time);
+
             tokio::spawn(async move {
+                // Determine if we should perform immediate authentication
+                let should_auth_immediately = {
+                    let mut last_auth = last_auth_time.lock().unwrap();
+                    match *last_auth {
+                        None => {
+                            // First refresh, authenticate immediately
+                            *last_auth = Some(Instant::now());
+                            true
+                        }
+                        Some(last_time) => {
+                            if last_time.elapsed() >= AUTH_INTERVAL {
+                                // 10 hours have passed, authenticate immediately
+                                *last_auth = Some(Instant::now());
+                                true
+                            } else {
+                                // Not yet time, defer authentication
+                                false
+                            }
+                        }
+                    }
+                };
+
                 let mut client = client_arc.write().await;
                 let result = client
-                    .update_connection_password(Some(new_token.clone()), true)
+                    .update_connection_password(Some(new_token.clone()), should_auth_immediately)
                     .await;
 
                 if let Err(e) = result {
+                    let auth_type = if should_auth_immediately {
+                        "with immediate auth"
+                    } else {
+                        "deferred"
+                    };
                     log_error(
                         "IAM token refresh",
-                        format!("Failed to update connection password with immediate auth: {e}"),
+                        format!("Failed to update connection password ({}): {e}", auth_type),
                     );
                 }
             });
