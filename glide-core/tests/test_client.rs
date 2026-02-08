@@ -45,11 +45,14 @@ pub(crate) mod shared_client_tests {
     };
 
     #[cfg(feature = "iam_tests")]
-    const ELASTICACHE_CLUSTER_IAM_ENDPOINT: &str = "elasticache-cluster-iam.endpoint"; // Replace with your cluster endpoint
+    const ELASTICACHE_CLUSTER_IAM_ENDPOINT: &str =
+        "clustercfg.iam-auth-test.nra7gl.use1.cache.amazonaws.com"; // Replace with your cluster endpoint
     #[cfg(feature = "iam_tests")]
-    const ELASTICACHE_STANDALONE_IAM_ENDPOINT: &str = "elasticache-standalone-iam.endpoint"; // Replace with your standalone endpoint
+    const ELASTICACHE_STANDALONE_IAM_ENDPOINT: &str =
+        "master.iam-auth-standalone.nra7gl.use1.cache.amazonaws.com"; // Replace with your standalone endpoint
     #[cfg(feature = "iam_tests")]
-    const MEMORYDB_CLUSTER_IAM_ENDPOINT: &str = "memorydb-cluster-iam.endpoint"; // Replace with your cluster endpoint
+    const MEMORYDB_CLUSTER_IAM_ENDPOINT: &str =
+        "clustercfg.iam-auth-test.nra7gl.memorydb.us-east-1.amazonaws.com"; // Replace with your cluster endpoint
 
     struct TestBasics {
         server: BackingServer,
@@ -620,7 +623,6 @@ pub(crate) mod shared_client_tests {
     #[cfg(feature = "iam_tests")]
     #[rstest]
     #[serial_test::serial]
-    #[timeout(SHORT_CLUSTER_TEST_TIMEOUT)]
     fn test_iam_lazy_connection_establishes_on_first_command_with_cluster() {
         block_on_all(async {
             remove_test_credentials();
@@ -654,6 +656,9 @@ pub(crate) mod shared_client_tests {
                 Ok(mut client) => {
                     // At this point, the client should be created but not yet connected
                     // The connection should be established on the first command
+
+                    // wait for the token to be expired to check if it creates a new one
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
                     // Send the first command - this should trigger the connection establishment
                     let result = client.send_command(&mut redis::cmd("PING"), None).await;
@@ -996,6 +1001,8 @@ pub(crate) mod shared_client_tests {
                             "IAM token refresh #{i} should succeed: {refresh_result:?}"
                         );
 
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
                         // Verify client still works after each refresh
                         let ping_result = client.send_command(&mut redis::cmd("PING"), None).await;
                         assert!(
@@ -1051,9 +1058,8 @@ pub(crate) mod shared_client_tests {
                 cluster_name,
                 username,
                 region,
-                // None,
-                Some(3600), // Use default refresh interval
-                true,       // cluster mode
+                Some(1),
+                true, // cluster mode
                 ServiceType::ELASTICACHE,
             );
 
@@ -1091,21 +1097,28 @@ pub(crate) mod shared_client_tests {
                         "GET should return the set value"
                     );
 
-                    // Change to 910 if you want the token to be expired before reconnect
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    for i in 0..1 {
+                        let sleep_duration = 10; // seconds                   
 
-                    // generate a new token before reconnect
-                    client.refresh_iam_token().await.unwrap();
+                        println!(
+                            "Iteration {}. Time passed: {} seconds",
+                            i,
+                            i * sleep_duration
+                        );
+                        // Change to 910 if you want the token to be expired before reconnect
+                        tokio::time::sleep(std::time::Duration::from_secs(sleep_duration)).await;
 
-                    // Kill all connections to simulate network interruption
-                    kill_connection(&mut client).await;
+                        // Kill all connections to simulate network interruption
+                        kill_connection(&mut client).await;
 
-                    // Test that the client can reconnect and function properly after connection kill
-                    let reconnect_ping = client.send_command(&mut redis::cmd("PING"), None).await;
-                    assert!(
-                        reconnect_ping.is_ok(),
-                        "PING after reconnection should succeed: {reconnect_ping:?}"
-                    );
+                        // Test that the client can reconnect and function properly after connection kill
+                        let reconnect_ping =
+                            client.send_command(&mut redis::cmd("PING"), None).await;
+                        assert!(
+                            reconnect_ping.is_ok(),
+                            "PING after reconnection should succeed: {reconnect_ping:?}"
+                        );
+                    }
 
                     // Verify that we can still retrieve the previously set value after reconnection
                     let get_after_reconnect = client

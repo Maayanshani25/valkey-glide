@@ -4,6 +4,7 @@ use aws_sigv4::http_request::{
     SignableBody, SignableRequest, SignatureLocation, SigningSettings, sign,
 };
 use aws_sigv4::sign::v4;
+use futures::future::BoxFuture;
 use logger_core::{log_debug, log_error, log_info, log_warn};
 use rand::Rng;
 use std::sync::Arc;
@@ -170,7 +171,7 @@ pub struct IAMTokenManager {
     /// Shutdown signal for graceful task termination
     shutdown_notify: Arc<Notify>,
     /// Optional callback for when token is refreshed - used to update connection passwords
-    token_refresh_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    token_refresh_callback: Option<Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>>,
 }
 
 /// Custom Debug implementation because of the callback function doesn't implement Debug
@@ -200,14 +201,14 @@ impl IAMTokenManager {
     /// * `refresh_interval_seconds` - Optional refresh interval in seconds. Defaults to 5 minutes (300 seconds).
     ///   Maximum allowed is 12 hours (43200 seconds). Values above 15 minutes (900 seconds) will log a warning
     ///   about potential performance consequences.
-    /// * `token_refresh_callback` - Optional callback to be called when the token is refreshed
+    /// * `token_refresh_callback` - Optional async callback to be called when the token is refreshed
     pub async fn new(
         cluster_name: String,
         username: String,
         region: String,
         service_type: ServiceType,
         refresh_interval_seconds: Option<u32>,
-        token_refresh_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        token_refresh_callback: Option<Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>>,
     ) -> Result<Self, GlideIAMError> {
         let validated_refresh_interval = validate_refresh_interval(refresh_interval_seconds)?;
         let creds = get_signing_identity(&region, service_type).await?;
@@ -260,7 +261,7 @@ impl IAMTokenManager {
         iam_token_state: IamTokenState,
         cached_token: Arc<RwLock<String>>,
         shutdown_notify: Arc<Notify>,
-        token_refresh_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
+        token_refresh_callback: Option<Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>>,
     ) {
         let refresh_interval = Duration::from_secs(iam_token_state.refresh_interval_seconds as u64);
 
@@ -289,14 +290,16 @@ impl IAMTokenManager {
     async fn handle_token_refresh(
         iam_token_state: &IamTokenState,
         cached_token: &Arc<RwLock<String>>,
-        token_refresh_callback: &Option<Arc<dyn Fn(String) + Send + Sync>>,
+        token_refresh_callback: &Option<
+            Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>,
+        >,
     ) {
         match Self::generate_token_with_backoff(iam_token_state).await {
             Ok(new_token) => {
                 Self::set_cached_token_static(cached_token, new_token.clone()).await;
 
                 if let Some(callback) = token_refresh_callback {
-                    callback(new_token);
+                    callback(new_token).await;
                 } else {
                     log_error(
                         "IAM token refresh warning",
@@ -484,6 +487,7 @@ fn strip_scheme(full: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
     use serde_json;
     use serial_test::serial;
     use std::env;
@@ -571,9 +575,12 @@ mod tests {
     }
 
     /// Helper function to create a test callback that logs when invoked
-    fn create_test_callback() -> Arc<dyn Fn(String) + Send + Sync> {
+    fn create_test_callback() -> Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync> {
         Arc::new(move |_token: String| {
-            log_info("Refresh callback invoked!", "");
+            async move {
+                log_info("Refresh callback invoked!", "");
+            }
+            .boxed()
         })
     }
 
@@ -593,9 +600,13 @@ mod tests {
 
         // Create a callback that increments the counter
         let callback = Arc::new(move |_token: String| {
-            let mut counter = callback_counter_clone.lock().unwrap();
-            *counter += 1;
-            log_info("Callback invoked! ", format!("Count: {}", *counter));
+            let callback_counter_clone = callback_counter_clone.clone();
+            async move {
+                let mut counter = callback_counter_clone.lock().unwrap();
+                *counter += 1;
+                log_info("Callback invoked! ", format!("Count: {}", *counter));
+            }
+            .boxed()
         });
 
         // Create IAM token manager with callback provided in constructor
@@ -649,9 +660,13 @@ mod tests {
 
         // Create a callback that sets the flag
         let callback = Arc::new(move |_token: String| {
-            let mut invoked = callback_invoked_clone.lock().unwrap();
-            *invoked = true;
-            log_info("Manual refresh callback invoked!", "");
+            let callback_invoked_clone = callback_invoked_clone.clone();
+            async move {
+                let mut invoked = callback_invoked_clone.lock().unwrap();
+                *invoked = true;
+                log_info("Manual refresh callback invoked!", "");
+            }
+            .boxed()
         });
 
         // Create IAM token manager with callback provided in constructor
@@ -690,7 +705,10 @@ mod tests {
         let region = "us-east-1".to_string();
 
         let callback = Arc::new(move |_token: String| {
-            log_info("Manual refresh callback invoked!", "");
+            async move {
+                log_info("Manual refresh callback invoked!", "");
+            }
+            .boxed()
         });
 
         let result = IAMTokenManager::new(
@@ -734,7 +752,10 @@ mod tests {
         let region = "us-east-1".to_string();
 
         let callback = Arc::new(move |_token: String| {
-            log_info("Manual refresh callback invoked!", "");
+            async move {
+                log_info("Manual refresh callback invoked!", "");
+            }
+            .boxed()
         });
 
         let manager = IAMTokenManager::new(
@@ -768,7 +789,10 @@ mod tests {
         let region = "us-east-1".to_string();
 
         let callback = Arc::new(move |_token: String| {
-            log_info("Manual refresh callback invoked!", "");
+            async move {
+                log_info("Manual refresh callback invoked!", "");
+            }
+            .boxed()
         });
 
         let manager = IAMTokenManager::new(
@@ -829,7 +853,10 @@ mod tests {
         let region = "us-east-1".to_string();
 
         let callback = Arc::new(move |_token: String| {
-            log_info("Manual refresh callback invoked!", "");
+            async move {
+                log_info("Manual refresh callback invoked!", "");
+            }
+            .boxed()
         });
 
         let mut manager = IAMTokenManager::new(

@@ -9,6 +9,7 @@ use crate::compression::zstd_backend::ZstdBackend;
 use crate::compression::{CompressionConfig, CompressionManager};
 use crate::scripts_container::get_script;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use logger_core::{log_debug, log_error, log_info, log_warn};
 use once_cell::sync::OnceCell;
 use redis::aio::ConnectionLike;
@@ -24,7 +25,6 @@ use redis::{
 pub use standalone_client::StandaloneClient;
 use std::io;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
@@ -260,6 +260,8 @@ pub struct Client {
     // Optional compression manager for automatic compression/decompression
     compression_manager: Option<Arc<CompressionManager>>,
     pubsub_synchronizer: Arc<dyn PubSubSynchronizer>,
+    // Track last time IAM authentication was performed (for 10-hour re-auth interval)
+    last_iam_auth_time: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 async fn run_with_timeout<T>(
@@ -1122,26 +1124,24 @@ impl Client {
 
     /// IAM token refresh callback function
     ///
-    /// On new token, spawns a task that write-locks the `Client` and calls
+    /// On new token, asynchronously write-locks the `Client` and calls
     /// `update_connection_password(Some(new_token), immediate_auth)` where `immediate_auth` is
     /// `true` once every 10 hours and `false` otherwise. Uses a strong `Arc<RwLock<Client>>`.
     /// Note: this can form a retain cycle; call `stop_refresh_task()` and drop the manager to tear down.
     fn iam_callback(
         client_arc: Arc<tokio::sync::RwLock<Client>>,
-    ) -> impl Fn(String) + Send + 'static {
-        // Track the last time we performed immediate authentication
-        // Initialize to None so the first refresh will authenticate immediately
-        let last_auth_time: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    ) -> impl Fn(String) -> BoxFuture<'static, ()> + Send + Sync + 'static {
         const AUTH_INTERVAL: Duration = Duration::from_secs(10 * 60 * 60); // 10 hours
 
         move |new_token: String| {
             let client_arc = Arc::clone(&client_arc);
-            let last_auth_time = Arc::clone(&last_auth_time);
 
-            tokio::spawn(async move {
+            async move {
+                let mut client = client_arc.write().await;
+
                 // Determine if we should perform immediate authentication
                 let should_auth_immediately = {
-                    let mut last_auth = last_auth_time.lock().unwrap();
+                    let mut last_auth = client.last_iam_auth_time.lock().unwrap();
                     match *last_auth {
                         None => {
                             // First refresh, authenticate immediately
@@ -1161,7 +1161,13 @@ impl Client {
                     }
                 };
 
-                let mut client = client_arc.write().await;
+                if should_auth_immediately {
+                    log_info(
+                        "IAM token refresh",
+                        "Performing immediate AUTH across connections",
+                    );
+                }
+
                 let result = client
                     .update_connection_password(Some(new_token.clone()), should_auth_immediately)
                     .await;
@@ -1177,7 +1183,8 @@ impl Client {
                         format!("Failed to update connection password ({}): {e}", auth_type),
                     );
                 }
-            });
+            }
+            .boxed()
         }
     }
 
@@ -1731,6 +1738,7 @@ impl Client {
                 compression_manager: compression_manager.clone(),
                 iam_token_manager: None,
                 pubsub_synchronizer: pubsub_synchronizer.clone(),
+                last_iam_auth_time: Arc::new(std::sync::Mutex::new(None)),
             };
 
             let client_arc = Arc::new(RwLock::new(client));
@@ -2144,6 +2152,7 @@ mod tests {
             iam_token_manager: None,
             compression_manager: None,
             pubsub_synchronizer,
+            last_iam_auth_time: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
